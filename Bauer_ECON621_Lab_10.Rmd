@@ -1,0 +1,192 @@
+---
+title: 'Lab #10'
+author: "Annie Bauer"
+date: "Jan 16th, 2020"
+output: html_document
+---
+
+```{r}
+test_scores <- read.csv("~/desktop/econ621/data/test_scores.csv", stringsAsFactors = F)
+```
+
+```{r message = FALSE, warning = FALSE}
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(varhandle)
+library(cvAUC)
+```
+
+#### PART 1) Clean and reformat data
+```{r}
+# Remove duplicated rows, duplicated columns, and strange anomaly
+test_scores <- test_scores[, -which(colnames(test_scores) %in% c("gradelevel", "academic_year", "percentile"))]
+test_scores <- test_scores[!duplicated(test_scores[, -which(colnames(test_scores) %in% c("testscore", "proficiency"))]),]
+test_scores <- test_scores[test_scores$student_id != 1031535,]
+```
+
+```{r}
+# Shorten testnames for simplicity
+test_scores$testname[test_scores$testname == "SBAC Preliminary"] <- "SBAC"
+test_scores$testname[test_scores$testname == "NWEA MAP"] <- "MAP"
+# Convert proficiency column to binary (1 for proficient 0 for not proficient)
+test_scores$proficiency <- ifelse(test_scores$proficiency == "Standard Met" | test_scores$proficiency == "Standard Exceeded" | test_scores$proficiency == "Y", 1, 0)
+unique(test_scores$proficiency)
+```
+
+```{r warning = FALSE}
+# Reformat data from long to wide so that each row is a unique student id
+test_scores_wide_1 <- dcast(test_scores, student_id + gender + race_ethnicity + school ~
+                            testname + subject + testperiod, value.var = "testscore", fun.aggregate = max)
+# Fix -Inf in first casted dataframe
+test_scores_wide_1[test_scores_wide_1 == "-Inf"] <- NA
+
+# To keep proficiency data in our analysis, we only want one proficiency score per test (don't want a student to be proficient AND not proficient on the same test). Subset all test data to get proficiency scorres for SBAC and benchmark tests
+test_scores_sbac_benchmark <- test_scores[test_scores$testname != "MAP", ]
+
+# Cast wide, aggregate on max value of proficiency. Assuming that the school district takes the highest score on the same test.
+test_scores_wide_sbac_benchmark <- dcast(test_scores_sbac_benchmark, student_id ~ testname + subject, value.var = "proficiency", fun.aggregate = max)
+
+# Fix -Inf in first casted dataframe
+test_scores_wide_sbac_benchmark[test_scores_wide_sbac_benchmark == "-Inf"] <- NA
+```
+
+```{r}
+# Merge the two wide dataframes
+all_test_data <- merge(test_scores_wide_sbac_benchmark, test_scores_wide_1, by = "student_id")
+```
+
+```{r}
+# Convert category variables to factors
+factor_vars <- c("gender", "race_ethnicity", "school")
+all_test_data[ , factor_vars] <- data.frame(sapply(all_test_data[ , factor_vars], as.factor))
+
+# Change race/ethnicity categories for space
+levels(all_test_data$race_ethnicity) <- c("AI", "AS", "AA", "FI", "HI", "PI", "MR", "WH")
+
+# Change category variables to dummies
+category_cols <- c("gender", "school", "race_ethnicity")
+
+for (i in 1:length(category_cols)) {
+  dummies <- to.dummy(all_test_data[ , category_cols[i]], category_cols[i])
+  all_test_data <- cbind(all_test_data, dummies)
+}
+
+# Determine most common value for category variables
+sapply(all_test_data[, category_cols], function(x) {
+  names(table(x))[order(table(x), decreasing = T)]
+})
+```
+Default values for category variables:
+
+- Gender: M
+- School: Wiggs
+- Race/Ethnicity: HI
+
+#### PART 2) Subset the data: 70% training, 20% test, 10% validation
+```{r}
+# Create a dataframe of unique student id and random values
+sets <- data.frame(student_id = unique(all_test_data$student_id),
+                   rand = runif(length(unique(all_test_data$student_id))))
+
+# Assign status based on unique values and merge into data
+sets$set <- ifelse(sets$rand < 0.7, 'train', ifelse(sets$rand >= 0.9, 'validate', 'test'))
+all_test_data <- merge(all_test_data, sets[, c('student_id', 'set')], by = 'student_id')
+
+# Subset by status
+train <- all_test_data[all_test_data$set == "train",]
+test <- all_test_data[all_test_data$set == "test",]
+validate <- all_test_data[all_test_data$set == "validate",]
+```
+
+
+#### PART 3) Estimate logit model on the training subset
+```{r warning = FALSE}
+model_formula <- as.formula("SBAC_Math ~ Benchmark_ELA + Benchmark_Math + SBAC_ELA + MAP_English_1 + MAP_English_3 + MAP_Math_1 + MAP_Math_3  + gender.F + school.Charles_Middle + school.Indian_Ridge + school.Nolan_Richardson + school.Parkland + race_ethnicity.AI + race_ethnicity.AS + race_ethnicity.AA + race_ethnicity.FI + race_ethnicity.PI + race_ethnicity.MR + race_ethnicity.WH")
+                                                                               
+test_data_training <- train[which(complete.cases(train[ ,all.vars(model_formula)])), ]
+
+logit_model <- glm(model_formula, data = test_data_training, family = binomial(link = "logit"))
+summary(logit_model)
+```
+
+#### PART 4) Constraining the model
+```{r echo = T, message = FALSE, results = "hide", warning = FALSE}
+constrained_logit_model <- step(logit_model, direction = 'backward')
+```
+
+```{r}
+summary(constrained_logit_model)
+```
+
+#### PART 5) Write a function to create predicted values from the model's parameters, and check the function against the model's fitted values.
+```{r}
+# only calculating probabilities for numeric variables
+# can't have 1 more unit of a school/race
+pred <- data.frame(score = c(0:250))
+
+pred$probability <- 1/(1 + exp(-(logit_model$coefficients["(Intercept)"] +
+                                   (pred$score * logit_model$coefficients["Benchmark_Math"] + 
+                                      pred$score * logit_model$coefficients["MAP_English_1"] +
+                                      pred$score * logit_model$coefficients["MAP_English_3"] + 
+                                      pred$score * logit_model$coefficients["MAP_Math_1"] +
+                                      pred$score * logit_model$coefficients["MAP_Math_3"] +
+                                      pred$score * logit_model$coefficients["SBAC_ELA"]))))
+```
+
+```{r}
+pred_probability <- function(data, obs, coefficients) 
+{pred <- rbind.fill(obs[names(data) %in% names(coefficients)],
+                    as.data.frame(t(coefficients))) %>% t %>% as.data.frame %>% subset(!is.na(V1))
+pred$product <- pred$V1 * pred$V2
+1/(1 + exp(-(sum(pred$product, unname(coefficients[1])))))
+}
+
+i <- 1
+pred_probability(test_data_training, test_data_training[i,], constrained_logit_model$coefficients)
+constrained_logit_model$fitted.values[i]
+```
+
+
+#### PART 6) Calculate optimized threshold for model predictions
+```{r warning = FALSE}
+thresh <- data.frame(threshold = seq(0, 1, 0.01))
+
+test_data_training <- data.frame(test_data_training, pred = constrained_logit_model$fitted.values)
+
+thresh$precision <- apply(thresh, 1, function(x) {sum(test_data_training$pred > x &
+                                                        test_data_training$SBAC_Math == 1)/sum(test_data_training$pred > x)})
+
+thresh$recall <- apply(thresh, 1, function(x) {sum(test_data_training$pred > x &
+                                                     test_data_training$SBAC_Math == 1)/sum(test_data_training$SBAC_Math == 1)})
+
+thresh$F1 <- 2 * ((thresh$precision * thresh$recall)/(thresh$precision + thresh$recall))
+head(thresh)
+
+thresh[which.max(thresh$F1),]
+
+best_thresh <- thresh[which.max(thresh$F1), "threshold"]
+best_thresh
+```
+
+
+#### PART 7) Evaluate the model's performance on training and testing datasets.
+
+We need to first create a test_data_test dataset with only variables used in the constrained dataset
+```{r}
+constrained_model_formula <- as.formula("SBAC_Math ~ Benchmark_Math + MAP_English_1 + MAP_English_3 + MAP_Math_1 + MAP_Math_3 + SBAC_ELA")
+test_data_test <- test[which(complete.cases(test[ ,all.vars(model_formula)])), ]
+
+logit_model_test <- glm(constrained_model_formula, data = test_data_test, family = binomial(link = "logit"))
+
+pred_probability(test_data_test, test_data_test[i,], logit_model_test$coefficients)
+logit_model_test$fitted.values[i]
+
+test_data_test <- data.frame(test_data_test, pred = logit_model_test$fitted.values)
+```
+
+```{r}
+AUC(ifelse(test_data_training$pred > best_thresh, 1, 0),test_data_training$SBAC_Math)
+AUC(ifelse(test_data_test$pred > best_thresh, 1, 0),test_data_test$SBAC_Math)
+```
+The train dataset yields a high AUC (close to 1), meaning the model does a good job of predicting whether a student will achieve proficiency on the SBAC Math test based on the parameters. The test data yields a slightly lower AUC which is still very close to 1 and tells us that our model on the test dataset does a better job of predicting whether a student passes the SBAC Math test than random chance.

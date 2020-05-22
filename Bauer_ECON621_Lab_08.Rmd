@@ -1,0 +1,186 @@
+---
+title: 'Lab #8'
+author: "Annie Bauer"
+date: "Jan 14th, 2020"
+output: html_document
+---
+
+
+```{r}
+ag_data <- read.csv("~/desktop/econ621/Data/ag_data.csv", stringsAsFactors = F)
+test_scores <- read.csv("~/desktop/econ621/Data/test_scores.csv", stringsAsFactors = F)
+airports <- read.csv("~/desktop/econ621/Data/airports.csv", stringsAsFactors = F)
+experiment_1 <- read.csv("~/desktop/econ621/Data/experiment_1.csv", stringsAsFactors = F)
+experiment_2 <- read.csv("~/desktop/econ621/Data/experiment_2.csv", stringsAsFactors = F)
+library(pwr)
+library(dplyr)
+```
+
+1.
+```{r}
+ag_cambodia <- ag_data[ag_data$item == "Food Availability per capita" & ag_data$commodity == "Total Grains/Cereals and Root Crops (R&T)" & ag_data$country == "Cambodia", ]
+ag_vietnam <- ag_data[ag_data$item == "Food Availability per capita" & ag_data$commodity == "Total Grains/Cereals and Root Crops (R&T)" & ag_data$country == "Vietnam", ]
+
+
+year_change <- function(column_vector) {
+for (i in 1:length(column_vector)) {
+  if (i == 1) {
+    df <- data.frame(n = i, amount = column_vector[i], diff = NA)
+  } else {
+    tmp <- data.frame(n = i, amount = column_vector[i], diff = column_vector[i] - column_vector[i - 1])
+    df <- rbind(df, tmp)
+  }
+}
+  return(df)
+}
+
+cambodia_change <- year_change(ag_cambodia$amount)
+vietnam_change  <- year_change(ag_vietnam$amount)
+
+final_df_cambodia <- merge(ag_cambodia, cambodia_change, by = "amount")
+final_df_vietnam <- merge(ag_vietnam, vietnam_change, by = "amount")
+```
+
+a.)
+```{r}
+# Calculate the pooled standard deviation
+pooled_sd <- sqrt((sd(final_df_cambodia$diff, na.rm = T)^2 + sd(final_df_vietnam$diff, na.rm = T)^2)/2)
+
+# Calculate the effect size
+effect_size <- (mean(final_df_cambodia$diff, na.rm = T) - mean(final_df_vietnam$diff, na.rm = T))/pooled_sd
+effect_size
+```
+
+b.)
+```{r}
+t.test(final_df_cambodia$diff, final_df_vietnam$diff)
+```
+
+Since the p-value is greater than 0.05, we fail to reject the null hypothesis and conclude that there is not a significant difference between how the two countries food availability per capita changed over time.
+
+Also, the effect size from a.) which is 0.1304192 is very small, meaning the difference between the Cambodia's food availability change over time and Vietnam's is trivial.
+
+c.)
+
+```{r}
+pwr.2p.test(h = effect_size, power = 0.8, sig.level = 0.05, alternative = "two.sided")
+```
+
+We would need 923 more years of data for both Cambodia and Vietnam.
+
+
+2. 
+a.)
+```{r}
+airports_clean <- airports[!duplicated(airports[,3:4]),]
+total_airports <- length(airports_clean$name)
+airports_10_percent <- 0.1 * total_airports
+pwr.2p2n.test(h = 0.4, n1 = total_airports, n2 = airports_10_percent, sig.level = 0.05)
+```
+Power = 1 means the probability of not finding significance when it is there (false negative - type II error) is equal to 0 for this experiment. The probability of finding true significance is equal to 1.
+
+b.)
+```{r}
+# checking ratio of US airports in entire dataset to ensure accurate sampling
+us_airports <- unique(airports[airports$country == "United States", 3:4])
+us_airports_total <- length(us_airports$name)
+ratio_of_us_airports <- us_airports_total / total_airports
+ratio_of_us_airports
+```
+
+About 20% of airports in this dataset are in the United States. Therefore, 20% of the airports in the treatment group should be in the United States and 80% will be elsewhere.
+
+```{r}
+# create new column that distinguishes airports in the US vs elsewhere
+airports_clean$in_US <- ifelse(airports_clean$country == "United States", "US", "Not US")
+# group by in_US column so that treatment group mirrors the dataset's proportion of airports in the US
+treatment_group <- sample_frac(group_by(airports_clean, in_US), 0.1)
+table(treatment_group$in_US)
+```
+
+3.
+
+```{r}
+experiment_progress <- function(sql_query, pwr = 0.8) {
+# load required packages
+  library(ggplot2)
+  library(pwr)
+
+# load data
+source("../../Data/GCP_local_IP_connection_setup.R")
+experiment_data <- dbGetQuery(con, sql_query)
+
+# variable that holds number of observations
+num_obs <- length(experiment_data$testscore)
+
+# create column vectors with test scores from each school
+Wiggs_scores <- experiment_data$testscore[experiment_data$school == "Wiggs"]
+Charles_Middle_scores <- experiment_data$testscore[experiment_data$school == "Charles Middle"]
+
+# Create mean score labels
+mean_score_wiggs <- paste("Wiggs Average Test Score:", round(mean(Wiggs_scores), digits = 2))
+mean_score_charles <- paste("Charles Middle Average Test Score:", round(mean(Charles_Middle_scores), digits = 2))
+
+# Calculate the current effect size and subsequent power
+effect_size <- abs((mean(Wiggs_scores) - mean(Charles_Middle_scores))/sqrt((sd(Wiggs_scores)^2 + sd(Charles_Middle_scores)^2)/2))
+power_stats <- pwr.2p.test(h = effect_size, n = num_obs, alternative = "two.sided")
+
+# Create labels for current level of power and number of observations still needed to achieve power threshold
+power_label <- ifelse(power_stats$power < pwr, 
+                        paste("power:", round(power_stats$power, digits = 2), "(below threshold)"),
+                        paste("power:", round(power_stats$power, digits = 2), "(threshold met)"))
+obs_needed_label <- ifelse(power_stats$power < pwr,
+                             paste("obs still needed:", (round(pwr.2p.test(h = effect_size, power = pwr, alternative = "two.sided")$n) - num_obs) *2),
+                           "sufficient observations")
+
+# Output visualization
+ggplot(experiment_data, aes(x = testscore, fill = school)) + geom_density(alpha = 0.5) +
+  xlim(0, 100) + 
+  geom_vline(xintercept = mean(Wiggs_scores)) + 
+  geom_vline(xintercept = mean(Charles_Middle_scores)) + 
+  geom_text(aes(0, 0.035, label = mean_score_wiggs), hjust = 0) +
+  geom_text(aes(0, 0.03, label = mean_score_charles),  hjust = 0) +
+  geom_text(aes(0, 0.025, label = paste("total obs:", nrow(experiment_data))),  hjust = 0) +
+  geom_text(aes(0, 0.02, label = power_label),  hjust = 0) +
+  geom_text(aes(0, 0.015, label = obs_needed_label),  hjust = 0)
+}
+```
+
+
+```{r}
+experiment_progress("SELECT school, testscore FROM (
+          	SELECT student_id, school, testscore, random() AS exp_order
+          	FROM econ_621.test_scores
+          	WHERE gradelevel = 5
+          	AND school IN ('Wiggs', 'Charles Middle')
+          	AND academic_year = 2015
+          	AND subject = 'Math'
+          	AND testname = 'Benchmark') a
+          ORDER BY exp_order
+          LIMIT 100")
+```
+
+a.) So far, Wiggs School school appears to perform better than Charles Middle in terms of average test scores. However, we need more observations in order to reach 0.8 power, meaning once we gather more data and reach this power threshold, we will have an 80% probability of finding true significance in the difference between the two schools intervention strategies.
+
+b.)
+```{r}
+experiment_progress("SELECT school, testscore FROM (
+          	SELECT student_id, school, testscore, random() AS exp_order
+          	FROM econ_621.test_scores
+          	WHERE gradelevel = 5
+          	AND school IN ('Wiggs', 'Charles Middle')
+          	AND academic_year = 2015
+          	AND subject = 'Math'
+          	AND testname = 'Benchmark') a
+          ORDER BY exp_order
+          LIMIT 300")
+```
+
+
+
+
+
+
+
+
+

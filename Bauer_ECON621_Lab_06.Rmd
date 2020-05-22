@@ -1,0 +1,84 @@
+---
+title: 'Lab #6'
+author: "Annie Bauer"
+date: "Jan 13, 2020"
+output: html_document
+---
+
+Assumption about the dataset: Only includes event actions from the first week after account creation for each user
+
+```{r}
+user_analysis <- function(sql_query) {
+# load required packages
+  library(ggplot2)
+  library(reshape2)
+  library(plyr)
+
+# load data
+source("../../Data/GCP_local_IP_connection_setup.R")
+three_months_data <- dbGetQuery(con, sql_query)
+  
+# transform character timestamp to date object
+three_months_data$timestamp <- as.Date(three_months_data$timestamp)
+  
+# cast data from long to wide to count each event type
+all_users <- dcast(three_months_data, timestamp + user_id ~ event_type, value.var = "timestamp", fun.aggregate = length)
+  
+# create new columns that hold the count of each event type by date and user id
+all_users$user_status <- ifelse(all_users$PhotoNameManuallyCreated > 0 | all_users$PhotoNameSuggestionAccepted > 0, 1, 0)
+all_users$name_suggested <- ifelse(all_users$PhotoNameSuggested > 0, 1, 0)
+all_users$no_name_suggested <- ifelse(all_users$PhotoNameSuggested == 0, 1, 0)
+
+# create new dataframe that holds proportion calculations by date
+activity_by_day <- ldply(lapply(split(all_users, all_users$timestamp), function(x)
+  {data.frame(active_users = sum(x$user_status), total_users = length(unique(x$user_id)), proportion_active = sum(x$user_status) / length(unique(x$user_id)), name_suggested = sum(x$name_suggested)/length(unique(x$user_id)), no_name_suggested = sum(x$no_name_suggested) / length(unique(x$user_id)))}), rbind)
+
+colnames(activity_by_day)[colnames(activity_by_day) == ".id"] <- "date"
+
+only_proportions <- activity_by_day[ , c("date", "proportion_active", "name_suggested", "no_name_suggested")]
+
+# stack activity type so only three columns remain (date, activity type and proportion of users)
+a <- melt(only_proportions, id = "date")
+a$date <- as.Date(a$date)
+colnames(a)[colnames(a) == "variable"] <- "activity_type"
+
+# create new dataframe with only necessary activity types for area chart 
+new_a <- a[a$activity_type != "proportion_active", ]
+
+line_graph <- ggplot(a, aes(x = date, y = value)) + geom_line(aes(group = activity_type, color = activity_type)) + scale_x_date("Date") + ylab("Proportion of Users") + ggtitle("Photo Suggestion Feature")
+
+area_chart <- ggplot(new_a, aes(x = date, y = value, fill = activity_type)) + geom_area() + scale_x_date("Date") + ylab("Proportion of Users") + scale_fill_discrete(name = "Saw a photo name suggestion", labels = c("yes", "no")) +
+ ggtitle("Photo Suggestion Feature")
+
+print(line_graph)
+print(area_chart)
+return(head(a))
+}
+```
+
+
+```{r}
+# output with three_months_on data
+user_analysis("WITH three_months_on AS (
+	SELECT date_trunc('month', min(timestamp)) + INTERVAL '3 months' AS date
+	FROM econ_621.photoname_event_data)
+  SELECT * FROM econ_621.photoname_event_data
+  WHERE timestamp < (SELECT date FROM three_months_on)")
+```
+
+```{r}
+# output with three_months_back data
+user_analysis("WITH three_months_back AS (
+	SELECT date_trunc('month', max(timestamp)) - INTERVAL '3 months' AS date
+	FROM econ_621.photoname_event_data)
+SELECT * FROM econ_621.photoname_event_data
+WHERE timestamp < (SELECT date FROM three_months_back)")
+```
+
+
+
+
+
+
+
+

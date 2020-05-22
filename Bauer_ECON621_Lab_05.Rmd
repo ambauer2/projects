@@ -1,0 +1,161 @@
+---
+title: "Lab #5"
+author: "Annie Bauer"
+date: "Jan 10th, 2019"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rgeos)
+library(reshape2)
+```
+
+```{r}
+test_scores <- read.csv("../../Data/test_scores.csv", stringsAsFactors = F)
+life_expectancy <- read.csv("../../Data/life_expectancy.csv", stringsAsFactors = F)
+str(test_scores)
+```
+
+#### 1.
+```{r}
+scores_2015 <- test_scores[test_scores$academic_year == 2015, ]
+ggplot(data = scores_2015, aes(x = school, fill = school)) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5)) + geom_bar(width = 0.8)
+```
+
+#### 2.
+```{r}
+scores_grade3 <- scores_2015[scores_2015$gradelevel == 3 & scores_2015$subject == "ELA"
+                             & scores_2015$testname == "SBAC Preliminary", ]
+
+ggplot(scores_grade3, aes(x = testscore, fill = gender)) + geom_histogram() + geom_vline(aes(xintercept = mean(testscore)),col='yellow',size=2) + ggtitle("3rd Grade Test Score Distribution")
+```
+
+#### 3.
+
+```{r}
+math_scores_grade4 <- scores_2015[scores_2015$gradelevel == 4 & scores_2015$subject == "Math" & scores_2015$testname != "Benchmark", ]
+unique(math_scores_grade4$testname)
+```
+
+```{r}
+# create new data frames with necessary info
+sbac <- math_scores_grade4[math_scores_grade4$testname == "SBAC Preliminary", c("student_id", "testscore", "testperiod","school"), ]
+nwea_map <- math_scores_grade4[math_scores_grade4$testname == "NWEA MAP", c("student_id", "testscore", "testperiod"),  ]
+
+# merge the dataframes on student_id
+new_df <- merge(sbac, nwea_map, by = "student_id")
+
+# edit column names to avoid confusion
+colnames(new_df)[colnames(new_df) == "testscore.x"] <- "sbac_score"
+colnames(new_df)[colnames(new_df) == "testscore.y"] <- "nwea_map_score"
+colnames(new_df)[colnames(new_df) == "testperiod.x"] <- "testperiod_sbac"
+colnames(new_df)[colnames(new_df) == "testperiod.y"] <- "testperiod_nwea_map"
+
+# check unique values of student id to compare after sorting and removing duplicated student ids
+length(unique(new_df$student_id))
+# sort the data by student id first, then by NWEA MAP test period (order ascending)
+new_df <- new_df[order(new_df[, "student_id"], new_df[, "testperiod_nwea_map"]),]
+
+# remove first duplicated value (so that higher test period remains in dataset)
+new_df <- new_df[duplicated(new_df$student_id), ]
+
+# rechecking unique values
+length(unique(new_df$student_id))
+```
+```{r}
+ggplot(new_df, aes(x = sbac_score  , y = nwea_map_score, color = school)) + geom_point() +
+ xlab("SBAC Preliminary Score") + ylab("NWEA MAP Score") + ggtitle("Relationship between test scores") +
+  geom_smooth(method="lm")
+```
+
+
+NWEA MAP and SBAC test scores are positively correlated. 
+
+#### 4.
+
+```{r}
+# load world data
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# transform life_expectancy dataset from wide to long, filter to 2018, and change problematic country names
+le_long <- melt(life_expectancy, id = "country", variable.name = "year", value.name = "life_expectancy")
+le_long <- le_long[le_long$year == "X2018", ]
+le_long$country[which(le_long$country == "Congo, Dem. Rep.")] <- "Democratic Republic of the Congo"
+le_long$country[which(le_long$country == "Congo, Rep.")] <- "Republic of Congo"
+le_long$country[which(le_long$country == "Cote d'Ivoire")] <- "Côte d'Ivoire"
+```
+
+
+```{r}
+# filter world data to Africa
+africa_data <- world[world$region_un == "Africa", ]
+colnames(africa_data)[colnames(africa_data) == "name_long"] <- "country"
+# merge africa data with life expectancy data
+africa_data <- merge(africa_data, le_long, by = "country", all.x = TRUE)
+```
+```{r}
+ggplot(data = africa_data) + geom_sf() + geom_sf(aes(fill = life_expectancy)) + ggtitle("Life Expectancy Map")
+```
+
+#### 5.
+
+
+```{r}
+unique(test_scores$subject)
+```
+
+```{r}
+English_ELA_scores_2015 <- test_scores[test_scores$academic_year == 2015 & test_scores$testname != "Benchmark" & test_scores$gradelevel == 5 & test_scores$subject != "Math", ]
+
+# Separate the different test types into new data frames
+nwea_map_2015 <- English_ELA_scores_2015[English_ELA_scores_2015$testname == "NWEA MAP", ]
+sbac_2015 <- English_ELA_scores_2015[English_ELA_scores_2015$testname == "SBAC Preliminary", ]
+
+# Remove NWEA MAP scores from lower test period so that each student has only 1 score for NWEA MAP
+nwea_map_2015 <- nwea_map_2015[order(nwea_map_2015[, "student_id"], nwea_map_2015[, "testperiod"]), ]
+nwea_map_2015 <- nwea_map_2015[duplicated(nwea_map_2015$student_id), ]
+```
+
+```{r}
+# determine proficiency levels for ela scores to mirror for percentile buckets
+unique(sbac_2015$proficiency)
+unique(nwea_map_2015$percentile)
+```
+
+Bins to create for percentiles
+1. 25th_percentile and below -> low
+2. 50th_percentile and below -> below_average
+3. 75th_percentile and below -> average
+4. 90th_percentile and higher -> high
+
+```{r}
+percentiles <- nwea_map_2015$percentile
+quantile(percentiles, c(0.25, 0.5, 0.75, 0.9))
+nwea_map_2015$percentile_bucket[which(nwea_map_2015$percentile < 9)] <- "low"
+nwea_map_2015$percentile_bucket[which(nwea_map_2015$percentile >= 9 & nwea_map_2015$percentile <= 28)] <- "below_average"
+nwea_map_2015$percentile_bucket[which(nwea_map_2015$percentile > 28 & nwea_map_2015$percentile <= 52)] <- "average"
+nwea_map_2015$percentile_bucket[which(nwea_map_2015$percentile > 52)] <- "high"
+```
+```{r}
+# merge nwea_map_2015 and sbac_2015 on student id
+english_ela_final <- merge(nwea_map_2015, sbac_2015, by = "student_id")
+```
+
+```{r}
+counts <- data.frame(table(english_ela_final$percentile_bucket, english_ela_final$proficiency.y))
+denominator <- sum(counts$Freq)
+counts$percentage <- counts$Freq/denominator * 100
+counts
+```
+
+
+```{r}
+ggplot(data = counts, aes(x = factor(Var1, level = c("low", "below_average", "average", "high")), y = Var2)) + geom_tile(aes(fill = percentage)) +
+  scale_fill_gradient2(high = "orangered", mid = "wheat", low = "cornflowerblue", midpoint = mean(counts$percentage)) +
+  geom_text(aes(label = format(counts$percentage,digits = 2))) +
+  xlab("ELA Percentile") + ylab("SBAC Proficiency") + ggtitle("Relationship between tests and scores")
+```
+
